@@ -1,0 +1,29 @@
+# Local environment and credentials
+.env*
+!.env.example
+.streamlit/secrets.toml
+secrets.toml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Virtual environments and Python cache
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local data and database artifacts
+*.csv
+*.sqlite
+*.sqlite3
+*.db
+*.bak
+*.dump
+*.sql.gz
+
+# Logs and operating-system files
+*.log
+.DS_Store
+Thumbs.db
