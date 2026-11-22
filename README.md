@@ -62,6 +62,23 @@ streamlit run app.py
 ```
 This opens the dashboard in your browser (usually `http://localhost:8501`). The sidebar shows a live "Database: Connected" indicator — if it shows "Not connected," double-check `.env`.
 
+### Deploy to Streamlit Community Cloud
+
+1. In Streamlit Community Cloud, choose **Create app**, then select this repository, the `main` branch, and `app.py`.
+2. In **Advanced settings → Secrets**, add the following TOML using credentials for a hosted MySQL database:
+
+   ```toml
+   DB_HOST = "your-mysql-host"
+   DB_PORT = 3306
+   DB_USER = "your-mysql-user"
+   DB_PASSWORD = "your-mysql-password"
+   DB_NAME = "ashoka_industries"
+   ```
+
+3. Deploy the app. Do not commit real credentials or transaction CSVs.
+
+The database must be hosted at a network address reachable from Community Cloud. `localhost` refers to the cloud app's own container, not your computer. Import authorized transaction data into the hosted database separately; the public repository includes only an empty schema.
+
 ---
 
 ## 4. Data privacy

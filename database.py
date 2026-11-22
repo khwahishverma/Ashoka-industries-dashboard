@@ -3,8 +3,8 @@ database.py
 ------------
 Handles the live MySQL connection for the Ashoka Industries dashboard.
 
-Credentials are read from environment variables (via a local .env file,
-see .env.example) so nothing sensitive is hard-coded or committed.
+Credentials are read from environment variables (via a local .env file)
+or Streamlit secrets. Nothing sensitive is hard-coded or committed.
 """
 
 import os
@@ -15,12 +15,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _config_value(key: str, default):
+    value = os.getenv(key)
+    if value is not None:
+        return value
+    try:
+        return st.secrets.get(key, default)
+    except FileNotFoundError:
+        return default
+
+
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "3306")),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "database": os.getenv("DB_NAME", "ashoka_industries"),
+    "host": _config_value("DB_HOST", "localhost"),
+    "port": int(_config_value("DB_PORT", "3306")),
+    "user": _config_value("DB_USER", "root"),
+    "password": _config_value("DB_PASSWORD", ""),
+    "database": _config_value("DB_NAME", "ashoka_industries"),
 }
 
 
