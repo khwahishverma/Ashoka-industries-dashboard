@@ -1,345 +1,319 @@
 """
-queries.py
-----------
-All SQL retrieval for the dashboard lives here, one function per
-analysis. Every function accepts a (start_date, end_date) tuple so
-the sidebar date filter can drive every KPI, chart and table from a
-single control.
-
-The underlying logic mirrors the SQL already written and verified in
-the MySQL phase of this project (see /sql/schema_setup.sql) - it is
-not a new analysis, just the same logic exposed to Python.
+Dashboard analytics over records fetched from Supabase.
 
 Normal sales analysis always filters transaction_type = 'Sale' so
-that the one Credit Note row and the separate sales_adjustments
-entries never contaminate sales totals, per the project's accounting
-rules.
+that credit notes and sales adjustments never contaminate sales totals.
 """
 
-import streamlit as st
+import numpy as np
 import pandas as pd
-from database import run_query
+import streamlit as st
 
-CACHE_TTL = 300  # seconds
+from database import fetch_table
+
+CACHE_TTL = 300
 
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
+def _filtered(table: str, date_column: str, start_date, end_date) -> pd.DataFrame:
+    frame = fetch_table(table)
+    if frame.empty:
+        return frame.copy()
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    dates = pd.to_datetime(frame[date_column], errors="coerce")
+    return frame.loc[dates.between(start, end)].copy()
 
-def _date_filter(column: str, start_date, end_date) -> str:
-    return f"{column} BETWEEN '{start_date}' AND '{end_date}'"
+
+def _sales(start_date, end_date) -> pd.DataFrame:
+    frame = _filtered("sales", "sale_date", start_date, end_date)
+    if frame.empty:
+        return frame
+    return frame.loc[frame["transaction_type"] == "Sale"].copy()
+
+
+def _number(frame: pd.DataFrame, column: str) -> pd.Series:
+    return pd.to_numeric(frame[column], errors="coerce")
+
+
+def _monthly(frame: pd.DataFrame, date_column: str, value_column: str, result_name: str):
+    if frame.empty:
+        return pd.DataFrame(columns=["month", result_name])
+    data = frame.assign(
+        month=pd.to_datetime(frame[date_column]).dt.strftime("%Y-%m"),
+        _value=_number(frame, value_column),
+    )
+    return (
+        data.groupby("month", as_index=False, dropna=False)["_value"]
+        .sum()
+        .rename(columns={"_value": result_name})
+        .sort_values("month")
+        .reset_index(drop=True)
+    )
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_date_bounds():
     """Return the full transaction date span for the sidebar's default range."""
-    df = run_query("""
-        SELECT MIN(d) AS min_date, MAX(d) AS max_date FROM (
-            SELECT sale_date AS d FROM sales
-            UNION ALL SELECT purchase_date FROM purchases
-            UNION ALL SELECT consumable_date FROM consumables
-        ) all_dates
-    """)
-    if df.empty or pd.isna(df.loc[0, "min_date"]):
+    dates = []
+    for table, column in (
+        ("sales", "sale_date"),
+        ("purchases", "purchase_date"),
+        ("consumables", "consumable_date"),
+    ):
+        frame = fetch_table(table)
+        if not frame.empty:
+            dates.extend(pd.to_datetime(frame[column], errors="coerce").dropna().tolist())
+
+    if not dates:
         fallback = pd.Timestamp.today().date()
         return fallback, fallback
-    min_date = pd.to_datetime(df.loc[0, "min_date"]).date()
-    max_date = pd.to_datetime(df.loc[0, "max_date"]).date()
-    return min_date, max_date
+    return min(dates).date(), max(dates).date()
 
-
-# ---------------------------------------------------------------------
-# Executive Overview KPIs
-# ---------------------------------------------------------------------
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_total_sales(start_date, end_date):
-    q = f"""
-        SELECT COALESCE(SUM(amount), 0) AS total_sales
-        FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-    """
-    return float(run_query(q).loc[0, "total_sales"])
+    frame = _sales(start_date, end_date)
+    return float(_number(frame, "amount").sum()) if not frame.empty else 0.0
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_total_purchases(start_date, end_date):
-    q = f"""
-        SELECT COALESCE(SUM(purchase_amount), 0) AS total_purchases
-        FROM purchases
-        WHERE {_date_filter('purchase_date', start_date, end_date)}
-    """
-    return float(run_query(q).loc[0, "total_purchases"])
+    frame = _filtered("purchases", "purchase_date", start_date, end_date)
+    return float(_number(frame, "purchase_amount").sum()) if not frame.empty else 0.0
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_total_consumables(start_date, end_date):
-    q = f"""
-        SELECT COALESCE(SUM(amount), 0) AS total_consumables
-        FROM consumables
-        WHERE {_date_filter('consumable_date', start_date, end_date)}
-    """
-    return float(run_query(q).loc[0, "total_consumables"])
+    frame = _filtered("consumables", "consumable_date", start_date, end_date)
+    return float(_number(frame, "amount").sum()) if not frame.empty else 0.0
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_total_quantity_sold(start_date, end_date):
-    q = f"""
-        SELECT COALESCE(SUM(quantity), 0) AS total_qty
-        FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-    """
-    return float(run_query(q).loc[0, "total_qty"])
+    frame = _sales(start_date, end_date)
+    return float(_number(frame, "quantity").sum()) if not frame.empty else 0.0
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_sales_transaction_count(start_date, end_date):
-    q = f"""
-        SELECT COUNT(*) AS cnt FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-    """
-    return int(run_query(q).loc[0, "cnt"])
+    return len(_sales(start_date, end_date))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_purchase_transaction_count(start_date, end_date):
-    q = f"SELECT COUNT(*) AS cnt FROM purchases WHERE {_date_filter('purchase_date', start_date, end_date)}"
-    return int(run_query(q).loc[0, "cnt"])
+    return len(_filtered("purchases", "purchase_date", start_date, end_date))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_consumable_transaction_count(start_date, end_date):
-    q = f"SELECT COUNT(*) AS cnt FROM consumables WHERE {_date_filter('consumable_date', start_date, end_date)}"
-    return int(run_query(q).loc[0, "cnt"])
+    return len(_filtered("consumables", "consumable_date", start_date, end_date))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_avg_invoice_value(start_date, end_date):
-    q = f"""
-        SELECT ROUND(AVG(amount), 2) AS avg_invoice FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-    """
-    val = run_query(q).loc[0, "avg_invoice"]
-    return float(val) if val is not None else 0.0
+    frame = _sales(start_date, end_date)
+    if frame.empty:
+        return 0.0
+    average = _number(frame, "amount").mean()
+    return round(float(average), 2) if pd.notna(average) else 0.0
 
-
-# ---------------------------------------------------------------------
-# Monthly series (Sales / Purchases / Consumables)
-# ---------------------------------------------------------------------
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_monthly_sales(start_date, end_date):
-    q = f"""
-        SELECT DATE_FORMAT(sale_date, '%Y-%m') AS month, SUM(amount) AS monthly_sales
-        FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-        GROUP BY DATE_FORMAT(sale_date, '%Y-%m')
-        ORDER BY month
-    """
-    return run_query(q)
+    return _monthly(_sales(start_date, end_date), "sale_date", "amount", "monthly_sales")
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_monthly_purchases(start_date, end_date):
-    q = f"""
-        SELECT DATE_FORMAT(purchase_date, '%Y-%m') AS month, SUM(purchase_amount) AS monthly_purchases
-        FROM purchases
-        WHERE {_date_filter('purchase_date', start_date, end_date)}
-        GROUP BY DATE_FORMAT(purchase_date, '%Y-%m')
-        ORDER BY month
-    """
-    return run_query(q)
+    frame = _filtered("purchases", "purchase_date", start_date, end_date)
+    return _monthly(frame, "purchase_date", "purchase_amount", "monthly_purchases")
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_monthly_consumables(start_date, end_date):
-    q = f"""
-        SELECT DATE_FORMAT(consumable_date, '%Y-%m') AS month, SUM(amount) AS monthly_consumables
-        FROM consumables
-        WHERE {_date_filter('consumable_date', start_date, end_date)}
-        GROUP BY DATE_FORMAT(consumable_date, '%Y-%m')
-        ORDER BY month
-    """
-    return run_query(q)
+    frame = _filtered("consumables", "consumable_date", start_date, end_date)
+    return _monthly(frame, "consumable_date", "amount", "monthly_consumables")
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_monthly_sales_ranked(start_date, end_date):
-    """Monthly sales with RANK() via a CTE, matching the verified SQL phase result."""
-    q = f"""
-        WITH monthly_sales AS (
-            SELECT DATE_FORMAT(sale_date, '%Y-%m') AS month, SUM(amount) AS total_sales
-            FROM sales
-            WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-            GROUP BY DATE_FORMAT(sale_date, '%Y-%m')
-        )
-        SELECT month, ROUND(total_sales, 2) AS total_sales,
-               RANK() OVER (ORDER BY total_sales DESC) AS sales_rank
-        FROM monthly_sales
-        ORDER BY sales_rank
-    """
-    return run_query(q)
+    monthly = get_monthly_sales(start_date, end_date).rename(
+        columns={"monthly_sales": "total_sales"}
+    )
+    if monthly.empty:
+        monthly["sales_rank"] = pd.Series(dtype="int64")
+        return monthly
+    monthly["sales_rank"] = monthly["total_sales"].rank(
+        method="min", ascending=False
+    ).astype(int)
+    monthly["total_sales"] = monthly["total_sales"].round(2)
+    return monthly.sort_values(["sales_rank", "month"]).reset_index(drop=True)
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_monthly_contribution(start_date, end_date):
-    q = f"""
-        SELECT month, ROUND(monthly_sales, 2) AS monthly_sales,
-               ROUND(monthly_sales * 100 / (
-                   SELECT SUM(amount) FROM sales
-                   WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-               ), 2) AS pct_of_total
-        FROM (
-            SELECT DATE_FORMAT(sale_date, '%Y-%m') AS month, SUM(amount) AS monthly_sales
-            FROM sales
-            WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-            GROUP BY DATE_FORMAT(sale_date, '%Y-%m')
-        ) monthly
-        ORDER BY month
-    """
-    return run_query(q)
+    monthly = get_monthly_sales(start_date, end_date).rename(
+        columns={"monthly_sales": "monthly_sales"}
+    )
+    if monthly.empty:
+        monthly["pct_of_total"] = pd.Series(dtype="float64")
+        return monthly
+    total = monthly["monthly_sales"].sum()
+    monthly["monthly_sales"] = monthly["monthly_sales"].round(2)
+    monthly["pct_of_total"] = (
+        (monthly["monthly_sales"] * 100 / total).round(2) if total else np.nan
+    )
+    return monthly
 
-
-# ---------------------------------------------------------------------
-# Sales Analytics
-# ---------------------------------------------------------------------
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_top_sales(start_date, end_date, n=10):
-    q = f"""
-        SELECT sale_date, bill_no, customer_name, quantity, ROUND(amount, 2) AS amount
-        FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-        ORDER BY amount DESC
-        LIMIT {int(n)}
-    """
-    return run_query(q)
+    frame = _sales(start_date, end_date)
+    columns = ["sale_date", "bill_no", "customer_name", "quantity", "amount"]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    frame = frame.assign(amount=_number(frame, "amount"))
+    return frame.sort_values("amount", ascending=False)[columns].head(int(n)).assign(
+        amount=lambda data: data["amount"].round(2)
+    ).reset_index(drop=True)
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_customer_wise_sales(start_date, end_date):
-    q = f"""
-        SELECT customer_name, COUNT(*) AS number_of_transactions,
-               SUM(quantity) AS total_quantity, ROUND(SUM(amount), 2) AS total_sales
-        FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-        GROUP BY customer_name
-        ORDER BY total_sales DESC
-    """
-    return run_query(q)
+    frame = _sales(start_date, end_date)
+    columns = [
+        "customer_name", "number_of_transactions", "total_quantity", "total_sales"
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    frame = frame.assign(
+        quantity=_number(frame, "quantity"),
+        amount=_number(frame, "amount"),
+    )
+    result = (
+        frame.groupby("customer_name", as_index=False, dropna=False)
+        .agg(
+            number_of_transactions=("sale_id", "size"),
+            total_quantity=("quantity", "sum"),
+            total_sales=("amount", "sum"),
+        )
+        .sort_values("total_sales", ascending=False)
+    )
+    result["total_sales"] = result["total_sales"].round(2)
+    return result[columns].reset_index(drop=True)
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_sales_classification(start_date, end_date):
-    q = f"""
-        SELECT bill_no, sale_date, ROUND(amount, 2) AS amount,
-            CASE
-                WHEN amount >= 200000 THEN 'High Value'
-                WHEN amount >= 100000 THEN 'Medium Value'
-                ELSE 'Lower Value'
-            END AS sales_category
-        FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-        ORDER BY amount DESC
-    """
-    return run_query(q)
+    frame = _sales(start_date, end_date)
+    columns = ["bill_no", "sale_date", "amount", "sales_category"]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    frame = frame.assign(amount=_number(frame, "amount"))
+    frame["sales_category"] = np.select(
+        [frame["amount"] >= 200000, frame["amount"] >= 100000],
+        ["High Value", "Medium Value"],
+        default="Lower Value",
+    )
+    return (
+        frame[columns]
+        .sort_values("amount", ascending=False)
+        .assign(amount=lambda data: data["amount"].round(2))
+        .reset_index(drop=True)
+    )
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_cumulative_sales(start_date, end_date):
-    q = f"""
-        SELECT sale_date, bill_no, ROUND(amount, 2) AS amount,
-               ROUND(SUM(amount) OVER (ORDER BY sale_date, sale_id), 2) AS cumulative_sales
-        FROM sales
-        WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-        ORDER BY sale_date, sale_id
-    """
-    return run_query(q)
+    frame = _sales(start_date, end_date)
+    columns = ["sale_date", "bill_no", "amount", "cumulative_sales"]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    frame = frame.assign(amount=_number(frame, "amount")).sort_values(
+        ["sale_date", "sale_id"]
+    )
+    frame["cumulative_sales"] = frame["amount"].cumsum().round(2)
+    frame["amount"] = frame["amount"].round(2)
+    return frame[columns].reset_index(drop=True)
 
-
-# ---------------------------------------------------------------------
-# Procurement Analytics
-# ---------------------------------------------------------------------
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_purchase_by_item(start_date, end_date):
-    q = f"""
-        SELECT item_name, COUNT(*) AS purchase_records, ROUND(SUM(purchase_amount), 2) AS total_purchase_value
-        FROM purchases
-        WHERE {_date_filter('purchase_date', start_date, end_date)}
-        GROUP BY item_name
-        ORDER BY total_purchase_value DESC
-    """
-    return run_query(q)
+    frame = _filtered("purchases", "purchase_date", start_date, end_date)
+    columns = ["item_name", "purchase_records", "total_purchase_value"]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    frame = frame.assign(purchase_amount=_number(frame, "purchase_amount"))
+    result = (
+        frame.groupby("item_name", as_index=False, dropna=False)
+        .agg(
+            purchase_records=("item_name", "size"),
+            total_purchase_value=("purchase_amount", "sum"),
+        )
+        .sort_values("total_purchase_value", ascending=False)
+    )
+    result["total_purchase_value"] = result["total_purchase_value"].round(2)
+    return result[columns].reset_index(drop=True)
 
-
-# ---------------------------------------------------------------------
-# Consumables Analytics
-# ---------------------------------------------------------------------
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_consumable_by_item(start_date, end_date):
-    q = f"""
-        SELECT item_name, SUM(quantity) AS total_quantity, ROUND(SUM(amount), 2) AS total_expenditure
-        FROM consumables
-        WHERE {_date_filter('consumable_date', start_date, end_date)}
-        GROUP BY item_name
-        ORDER BY total_expenditure DESC
-    """
-    return run_query(q)
+    frame = _filtered("consumables", "consumable_date", start_date, end_date)
+    columns = ["item_name", "total_quantity", "total_expenditure"]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    frame = frame.assign(
+        quantity=_number(frame, "quantity"),
+        amount=_number(frame, "amount"),
+    )
+    result = (
+        frame.groupby("item_name", as_index=False, dropna=False)
+        .agg(total_quantity=("quantity", "sum"), total_expenditure=("amount", "sum"))
+        .sort_values("total_expenditure", ascending=False)
+    )
+    result["total_expenditure"] = result["total_expenditure"].round(2)
+    return result[columns].reset_index(drop=True)
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_top_consumable_items(start_date, end_date, n=5):
-    q = f"""
-        SELECT item_name, ROUND(SUM(amount), 2) AS total_expenditure
-        FROM consumables
-        WHERE {_date_filter('consumable_date', start_date, end_date)}
-        GROUP BY item_name
-        ORDER BY total_expenditure DESC
-        LIMIT {int(n)}
-    """
-    return run_query(q)
+    result = get_consumable_by_item(start_date, end_date)
+    return result[["item_name", "total_expenditure"]].head(int(n)).reset_index(
+        drop=True
+    )
 
-
-# ---------------------------------------------------------------------
-# Sales vs Purchases
-# ---------------------------------------------------------------------
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_sales_vs_purchases(start_date, end_date):
-    q = f"""
-        SELECT s.month, ROUND(s.sales_value, 2) AS sales_value, ROUND(p.purchase_value, 2) AS purchase_value,
-               ROUND(s.sales_value - p.purchase_value, 2) AS sales_minus_purchases
-        FROM (
-            SELECT DATE_FORMAT(sale_date, '%Y-%m') AS month, SUM(amount) AS sales_value
-            FROM sales
-            WHERE transaction_type = 'Sale' AND {_date_filter('sale_date', start_date, end_date)}
-            GROUP BY DATE_FORMAT(sale_date, '%Y-%m')
-        ) s
-        JOIN (
-            SELECT DATE_FORMAT(purchase_date, '%Y-%m') AS month, SUM(purchase_amount) AS purchase_value
-            FROM purchases
-            WHERE {_date_filter('purchase_date', start_date, end_date)}
-            GROUP BY DATE_FORMAT(purchase_date, '%Y-%m')
-        ) p ON s.month = p.month
-        ORDER BY s.month
-    """
-    return run_query(q)
+    sales = get_monthly_sales(start_date, end_date).rename(
+        columns={"monthly_sales": "sales_value"}
+    )
+    purchases = get_monthly_purchases(start_date, end_date).rename(
+        columns={"monthly_purchases": "purchase_value"}
+    )
+    result = sales.merge(purchases, on="month", how="inner")
+    if result.empty:
+        return pd.DataFrame(
+            columns=["month", "sales_value", "purchase_value", "sales_minus_purchases"]
+        )
+    result["sales_value"] = result["sales_value"].round(2)
+    result["purchase_value"] = result["purchase_value"].round(2)
+    result["sales_minus_purchases"] = (
+        result["sales_value"] - result["purchase_value"]
+    ).round(2)
+    return result.sort_values("month").reset_index(drop=True)
 
-
-# ---------------------------------------------------------------------
-# Accounting Adjustments (kept separate from normal sales analysis)
-# ---------------------------------------------------------------------
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_sales_adjustments(start_date, end_date):
-    q = f"""
-        SELECT adjustment_date, reference, description,
-               ROUND(amount, 2) AS amount, adjustment_type
-        FROM sales_adjustments
-        WHERE {_date_filter('adjustment_date', start_date, end_date)}
-        ORDER BY adjustment_date
-    """
-    return run_query(q)
+    frame = _filtered("sales_adjustments", "adjustment_date", start_date, end_date)
+    columns = ["adjustment_date", "reference", "description", "amount", "adjustment_type"]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    frame = frame.assign(amount=_number(frame, "amount"))
+    return (
+        frame[columns]
+        .sort_values("adjustment_date")
+        .assign(amount=lambda data: data["amount"].round(2))
+        .reset_index(drop=True)
+    )

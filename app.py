@@ -232,8 +232,8 @@ with st.sidebar:
 
 if not connected:
     st.warning(
-        "The dashboard cannot reach the MySQL database. Verify `.env` credentials, "
-        "confirm the `ashoka_industries` database is running, then refresh this page."
+        "The dashboard cannot reach Supabase. Verify `SUPABASE_URL` and the "
+        "server-side key in `.env` or Streamlit Secrets, then refresh this page."
     )
     st.stop()
 
@@ -700,6 +700,6 @@ elif page in ["Sales Management", "Purchase Management", "Consumables Management
 st.markdown("""
 <div class="footer-note">
 MKT322 — Advanced Business Analytics · Academic Task 1 · Ashoka Industries, Hoshiarpur, Punjab<br>
-Dashboard built with Streamlit, Plotly and a live MySQL connection. All figures are calculated directly from the database.
+Dashboard built with Streamlit, Plotly and Supabase. All figures are calculated directly from the database.
 </div>
 """, unsafe_allow_html=True)

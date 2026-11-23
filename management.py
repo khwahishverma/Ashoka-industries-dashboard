@@ -2,7 +2,12 @@
 
 import pandas as pd
 
-from database import execute_write, run_query
+from database import (
+    delete_record as delete_supabase_record,
+    fetch_table,
+    insert_record,
+    update_record as update_supabase_record,
+)
 
 
 TABLES = {
@@ -60,35 +65,22 @@ TABLES = {
 
 def get_records(category: str) -> pd.DataFrame:
     config = TABLES[category]
-    return run_query(
-        f"SELECT * FROM {config['table']} ORDER BY {config['pk']} DESC"
-    )
+    records = fetch_table(config["table"])
+    return records.sort_values(config["pk"], ascending=False).reset_index(drop=True)
 
 
 def add_record(category: str, values: dict):
     config = TABLES[category]
-    columns = [field[0] for field in config["fields"]]
-    placeholders = ", ".join(["%s"] * len(columns))
-    query = (
-        f"INSERT INTO {config['table']} ({', '.join(columns)}) "
-        f"VALUES ({placeholders})"
-    )
-    return execute_write(query, tuple(values[column] for column in columns))
+    payload = {field[0]: values[field[0]] for field in config["fields"]}
+    return insert_record(config["table"], payload)
 
 
 def update_record(category: str, record_id, values: dict):
     config = TABLES[category]
-    columns = [field[0] for field in config["fields"]]
-    assignments = ", ".join(f"{column} = %s" for column in columns)
-    query = (
-        f"UPDATE {config['table']} SET {assignments} "
-        f"WHERE {config['pk']} = %s"
-    )
-    params = tuple(values[column] for column in columns) + (record_id,)
-    return execute_write(query, params)
+    payload = {field[0]: values[field[0]] for field in config["fields"]}
+    return update_supabase_record(config["table"], record_id, payload)
 
 
 def delete_record(category: str, record_id):
     config = TABLES[category]
-    query = f"DELETE FROM {config['table']} WHERE {config['pk']} = %s"
-    return execute_write(query, (record_id,))
+    return delete_supabase_record(config["table"], record_id)
